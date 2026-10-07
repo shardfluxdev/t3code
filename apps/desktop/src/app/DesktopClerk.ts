@@ -6,6 +6,7 @@ import * as Layer from "effect/Layer";
 import * as Option from "effect/Option";
 import * as Schema from "effect/Schema";
 import * as Scope from "effect/Scope";
+import type * as Electron from "electron";
 
 import { codexAuthDeliveryUrl, readCodexAuthHandoff } from "@t3tools/shared/codexAuthHandoff";
 import { receiveCodexAuthCallback, CodexAuthCallbackError } from "./CodexAuthCallback.ts";
@@ -18,6 +19,11 @@ import * as ElectronProtocol from "../electron/ElectronProtocol.ts";
 import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopUserData from "./DesktopUserData.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
+import {
+  DesktopSshEnvironmentLinkQueue,
+  readDesktopSshEnvironmentLink,
+} from "./DesktopSshEnvironmentLink.ts";
+import { SSH_ENVIRONMENT_LINK_REQUEST_CHANNEL } from "../ipc/channels.ts";
 
 declare const __T3CODE_BUILD_CLERK_PUBLISHABLE_KEY__: string | undefined;
 
@@ -55,6 +61,10 @@ export class DesktopClerk extends Context.Service<
       never,
       ElectronApp.ElectronApp | ElectronWindow.ElectronWindow | Scope.Scope
     >;
+    readonly setEnvironmentLinkReady: (
+      ready: boolean,
+    ) => Effect.Effect<void, never, ElectronWindow.ElectronWindow>;
+    readonly completeEnvironmentLink: (requestId: string) => Effect.Effect<void>;
   }
 >()("@t3tools/desktop/app/DesktopClerk") {}
 
@@ -93,6 +103,14 @@ export const make = Effect.gen(function* () {
   const environment = yield* DesktopEnvironment.DesktopEnvironment;
   const electronApp = yield* ElectronApp.ElectronApp;
   const shell = yield* ElectronShell.ElectronShell;
+  const environmentLinks = new DesktopSshEnvironmentLinkQueue();
+  let detachEnvironmentLinkWindow: (() => void) | null = null;
+  yield* Effect.addFinalizer(() =>
+    Effect.sync(() => {
+      detachEnvironmentLinkWindow?.();
+      environmentLinks.setRenderer(null);
+    }),
+  );
 
   // The SDK bridge acquires Electron's profile-scoped single-instance lock.
   // Must not yield: the bridge registers a scheme Electron rejects once ready.
@@ -122,11 +140,51 @@ export const make = Effect.gen(function* () {
   );
 
   return DesktopClerk.of({
+    setEnvironmentLinkReady: (ready) =>
+      Effect.gen(function* () {
+        detachEnvironmentLinkWindow?.();
+        detachEnvironmentLinkWindow = null;
+        environmentLinks.setRenderer(null);
+        if (!ready) return;
+        const windows = yield* ElectronWindow.ElectronWindow;
+        const main = yield* windows.main;
+        if (Option.isNone(main) || main.value.webContents.isDestroyed()) return;
+        const contents = main.value.webContents;
+        const clear = () => environmentLinks.setRenderer(null);
+        const onNavigation = (
+          event: Electron.Event<Electron.WebContentsDidStartNavigationEventParams>,
+        ) => {
+          if (event.isMainFrame && !event.isSameDocument) clear();
+        };
+        contents.once("destroyed", clear);
+        contents.on("did-start-navigation", onNavigation);
+        detachEnvironmentLinkWindow = () => {
+          contents.removeListener("destroyed", clear);
+          contents.removeListener("did-start-navigation", onNavigation);
+        };
+        environmentLinks.setRenderer((request) =>
+          contents.send(SSH_ENVIRONMENT_LINK_REQUEST_CHANNEL, request),
+        );
+      }),
+    completeEnvironmentLink: (requestId) => Effect.sync(() => environmentLinks.complete(requestId)),
     configure: Effect.gen(function* () {
       const electronApp = yield* ElectronApp.ElectronApp;
       const electronWindow = yield* ElectronWindow.ElectronWindow;
       const context = yield* Effect.context<ElectronWindow.ElectronWindow>();
       const runPromise = Effect.runPromiseWith(context);
+      const openEnvironmentLink = (value: string | undefined) => {
+        if (!value) return false;
+        const link = readDesktopSshEnvironmentLink(value, environment.isDevelopment);
+        if (link === null) return false;
+        environmentLinks.enqueue(link);
+        void runPromise(
+          Effect.gen(function* () {
+            const main = yield* electronWindow.currentMainOrFirst;
+            if (Option.isSome(main)) yield* electronWindow.reveal(main.value);
+          }),
+        );
+        return true;
+      };
 
       // The SDK bridge holds Electron's single-instance lock (acquired at
       // bridge creation) so OAuth deep-link callbacks on Windows/Linux are
@@ -183,12 +241,20 @@ export const make = Effect.gen(function* () {
         return true;
       };
       const args = yield* HostProcessArguments;
-      args.some((value) => startProviderAuthHandoff(value));
+      args.some((value) => startProviderAuthHandoff(value) || openEnvironmentLink(value));
       yield* electronApp.on("open-url", (event: { preventDefault: () => void }, url: string) => {
-        if (startProviderAuthHandoff(url) || resumeProviderAuth(url)) event.preventDefault();
+        if (startProviderAuthHandoff(url) || resumeProviderAuth(url) || openEnvironmentLink(url))
+          event.preventDefault();
       });
       yield* electronApp.on("second-instance", (_event: unknown, argv: readonly string[]) => {
-        if (argv?.some((value) => startProviderAuthHandoff(value) || resumeProviderAuth(value)))
+        if (
+          argv?.some(
+            (value) =>
+              startProviderAuthHandoff(value) ||
+              resumeProviderAuth(value) ||
+              openEnvironmentLink(value),
+          )
+        )
           return;
         void runPromise(
           Effect.gen(function* () {

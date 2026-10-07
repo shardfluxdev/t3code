@@ -284,6 +284,20 @@ contextBridge.exposeInMainWorld("desktopBridge", {
       ipcRenderer.removeListener(IpcChannels.UPDATE_STATE_CHANNEL, wrappedListener);
     };
   },
+  sshEnvironmentLinks: {
+    setReady: (ready) => ipcRenderer.invoke(IpcChannels.SSH_ENVIRONMENT_LINK_READY_CHANNEL, ready),
+    complete: (requestId) =>
+      ipcRenderer.invoke(IpcChannels.SSH_ENVIRONMENT_LINK_COMPLETE_CHANNEL, requestId),
+    onRequest: (listener) => {
+      const wrapped = (_event: Electron.IpcRendererEvent, request: unknown) => {
+        if (typeof request !== "object" || request === null) return;
+        listener(request as Parameters<typeof listener>[0]);
+      };
+      ipcRenderer.on(IpcChannels.SSH_ENVIRONMENT_LINK_REQUEST_CHANNEL, wrapped);
+      return () =>
+        ipcRenderer.removeListener(IpcChannels.SSH_ENVIRONMENT_LINK_REQUEST_CHANNEL, wrapped);
+    },
+  },
   appActivation: {
     setReady: (ready) =>
       ipcRenderer.invoke(IpcChannels.DESKTOP_APP_ACTIVATION_READY_CHANNEL, ready),

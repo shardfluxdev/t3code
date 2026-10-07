@@ -1102,6 +1102,14 @@ export const DesktopPreviewRecordingSaveInputSchema = Schema.Struct({
 export const SystemSettingsPaneSchema = Schema.Literals(["full-disk-access"]);
 export type SystemSettingsPane = typeof SystemSettingsPaneSchema.Type;
 
+export type DesktopSshEnvironmentLink =
+  | { readonly action: "open"; readonly alias: string; readonly path: string }
+  | { readonly action: "forget"; readonly alias: string };
+
+export type DesktopSshEnvironmentLinkRequest = DesktopSshEnvironmentLink & {
+  readonly requestId: string;
+};
+
 export interface DesktopBridge {
   getAppBranding: () => DesktopAppBranding | null;
   /** Absolute path of a dropped or picked file; absent on desktop builds predating it. */
@@ -1237,6 +1245,12 @@ export interface DesktopBridge {
     setReady: (ready: boolean) => Promise<void>;
     complete: (response: DesktopAppActivationResponse) => Promise<void>;
     onRequest: (listener: (request: DesktopAppActivationRequest) => void) => () => void;
+  };
+  /** Present when the desktop shell accepts SSH environment links. */
+  sshEnvironmentLinks?: {
+    setReady: (ready: boolean) => Promise<void>;
+    complete: (requestId: string) => Promise<void>;
+    onRequest: (listener: (request: DesktopSshEnvironmentLinkRequest) => void) => () => void;
   };
   /**
    * Desktop-only preview surface. Present iff the renderer is hosted by the

@@ -1,5 +1,7 @@
 // @effect-diagnostics nodeBuiltinImport:off globalFetchInEffect:off - Hosted handoff test uses a real localhost listener without an OpenAI account.
 import * as NodeHttp from "node:http";
+import * as NodeEvents from "node:events";
+import type * as Electron from "electron";
 import * as NodePath from "@effect/platform-node/NodePath";
 import { codexAuthHandoffUrl, readCodexAuthDelivery } from "@t3tools/shared/codexAuthHandoff";
 import { EnvironmentId, ProviderInstanceId } from "@t3tools/contracts";
@@ -37,6 +39,7 @@ import * as ElectronWindow from "../electron/ElectronWindow.ts";
 import * as DesktopClerk from "./DesktopClerk.ts";
 import * as DesktopEnvironment from "./DesktopEnvironment.ts";
 import * as DesktopPreReadyFileSystem from "./DesktopPreReadyFileSystem.ts";
+import { SSH_ENVIRONMENT_LINK_REQUEST_CHANNEL } from "../ipc/channels.ts";
 
 const layerDesktopClerk = (
   isDevelopment = true,
@@ -299,6 +302,67 @@ it.effect(
       Effect.provide(layerDesktopClerk()),
       Effect.provideService(ElectronApp.ElectronApp, electronApp),
       Effect.provideService(ElectronWindow.ElectronWindow, electronWindow),
+    );
+  },
+);
+
+it.effect.each(["startup", "open-url", "second-instance"] as const)(
+  "delivers an SSH link from %s only after the renderer is ready",
+  (entry) => {
+    storageMock.mockReturnValue(storageAdapter);
+    createClerkBridgeMock.mockReturnValue({ cleanup: vi.fn(), isPrimaryInstance: true });
+    const link =
+      "t3code-dev://environments/ssh?alias=shardflux-shardflux-main&path=/home/user/shardflux";
+    const listeners = new Map<string, (...args: unknown[]) => void>();
+    const send = vi.fn();
+    const contents = Object.assign(new NodeEvents.EventEmitter(), {
+      isDestroyed: () => false,
+      send,
+    });
+    const window = { webContents: contents } as unknown as Electron.BrowserWindow;
+    const windows = {
+      main: Effect.succeed(Option.some(window)),
+      currentMainOrFirst: Effect.succeed(Option.some(window)),
+      reveal: () => Effect.void,
+    } as unknown as ElectronWindow.ElectronWindow["Service"];
+    const app = {
+      on: (name: string, listener: (...args: unknown[]) => void) =>
+        Effect.sync(() => {
+          listeners.set(name, listener);
+        }),
+    } as unknown as ElectronApp.ElectronApp["Service"];
+    return Effect.gen(function* () {
+      const clerk = yield* DesktopClerk.DesktopClerk;
+      yield* clerk.configure;
+      const event = { preventDefault: vi.fn() };
+      if (entry === "open-url") listeners.get("open-url")!(event, link);
+      if (entry === "second-instance") listeners.get("second-instance")!({}, ["t3", link]);
+      assert.equal(send.mock.calls.length, 0);
+      yield* clerk.setEnvironmentLinkReady(true);
+      assert.deepEqual(send.mock.calls, [
+        [
+          SSH_ENVIRONMENT_LINK_REQUEST_CHANNEL,
+          {
+            action: "open",
+            alias: "shardflux-shardflux-main",
+            path: "/home/user/shardflux",
+            requestId: "1",
+          },
+        ],
+      ]);
+      if (entry === "open-url") assert.equal(event.preventDefault.mock.calls.length, 1);
+      yield* clerk.completeEnvironmentLink("1");
+      yield* clerk.setEnvironmentLinkReady(false);
+      yield* clerk.setEnvironmentLinkReady(true);
+      assert.equal(send.mock.calls.length, 1);
+      yield* clerk.setEnvironmentLinkReady(false);
+      assert.equal(contents.listenerCount("did-start-navigation"), 0);
+    }).pipe(
+      Effect.scoped,
+      Effect.provide(layerDesktopClerk()),
+      Effect.provideService(HostProcessArguments, entry === "startup" ? ["t3", link] : []),
+      Effect.provideService(ElectronApp.ElectronApp, app),
+      Effect.provideService(ElectronWindow.ElectronWindow, windows),
     );
   },
 );
