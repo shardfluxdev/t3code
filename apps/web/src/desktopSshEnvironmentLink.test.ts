@@ -11,6 +11,7 @@ import { describe, expect, it, vi } from "vite-plus/test";
 import {
   findSavedSshEnvironment,
   handleDesktopSshEnvironmentLink,
+  waitForDesktopSshEnvironment,
   type DesktopSshEnvironmentLinkDependencies,
 } from "./desktopSshEnvironmentLink";
 
@@ -79,6 +80,53 @@ describe("saved SSH alias lookup", () => {
         target.alias,
       ),
     ).toThrow("More than one");
+  });
+});
+
+describe("SSH environment readiness", () => {
+  it("reports a real connection rejection instead of waiting for a snapshot", async () => {
+    const subscribe = vi.fn(() => () => undefined);
+    await expect(
+      waitForDesktopSshEnvironment({
+        read: () => ({
+          ready: false,
+          error:
+            "This client requires a newer server. Update T3 Code on ws-89d0c8daa40b to connect.",
+        }),
+        subscribe,
+        signal: new AbortController().signal,
+      }),
+    ).rejects.toThrow("requires a newer server");
+    expect(subscribe).not.toHaveBeenCalled();
+  });
+  it("awaits the live snapshot transition and detaches its listener", async () => {
+    let ready = false;
+    let changed = () => {};
+    const unsubscribe = vi.fn();
+    const waiting = waitForDesktopSshEnvironment({
+      read: () => ({ ready, error: null }),
+      subscribe: (listener) => {
+        changed = listener;
+        return unsubscribe;
+      },
+      signal: new AbortController().signal,
+    });
+    ready = true;
+    changed();
+    await waiting;
+    expect(unsubscribe).toHaveBeenCalledOnce();
+  });
+  it("cancels and detaches when the renderer closes", async () => {
+    const controller = new AbortController();
+    const unsubscribe = vi.fn();
+    const waiting = waitForDesktopSshEnvironment({
+      read: () => ({ ready: false, error: null }),
+      subscribe: () => unsubscribe,
+      signal: controller.signal,
+    });
+    controller.abort();
+    await expect(waiting).rejects.toThrow("cancelled");
+    expect(unsubscribe).toHaveBeenCalledOnce();
   });
 });
 
