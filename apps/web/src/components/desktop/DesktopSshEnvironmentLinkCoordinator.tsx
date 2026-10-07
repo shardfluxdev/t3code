@@ -51,13 +51,7 @@ export function DesktopSshEnvironmentLinkCoordinator() {
             appAtomRegistry.get(environmentCatalog.catalogValueAtom).entries,
             alias,
           ),
-        resolveTarget: async (alias) => {
-          const hosts = await bridge.discoverSshHosts();
-          if (!hosts.some((host) => host.alias === alias && host.source === "ssh-config")) {
-            throw new Error(`SSH alias ${alias} was not found in your SSH configuration.`);
-          }
-          return bridge.resolveSshHost(alias);
-        },
+        resolveTarget: (alias) => bridge.resolveSshHost(alias),
         confirm: async (message, destructive) =>
           requestConfirmDialog(message, { variant: destructive ? "destructive" : "default" }),
         connect: async (target, saved) => {

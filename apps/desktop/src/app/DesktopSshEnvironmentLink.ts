@@ -5,7 +5,7 @@ import type {
 
 import { getDesktopScheme } from "../electron/ElectronProtocol.ts";
 
-/** Accepts only a configured alias and an absolute remote directory, never SSH options. */
+/** Accepts an alias and an absolute remote directory, never SSH options. */
 export function readDesktopSshEnvironmentLink(
   value: string,
   isDevelopment: boolean,
